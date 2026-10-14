@@ -1,4 +1,5 @@
 site_name: Docs as Code
+site_description: Документация ИИ-проекта в подходе Docs as Code
 
 theme:
   name: material
@@ -6,3 +7,17 @@ theme:
 
 plugins:
   - search
+
+markdown_extensions:
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Главная: index.md
+  - Проект:
+      - Описание: project/overview.md
+      - Требования: project/requirements.md
+      - Диаграммы: project/diagrams.md
