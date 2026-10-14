@@ -1,0 +1,8 @@
+site_name: Docs as Code
+
+theme:
+  name: material
+  language: ru
+
+plugins:
+  - search
