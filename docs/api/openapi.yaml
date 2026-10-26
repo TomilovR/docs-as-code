@@ -1,0 +1,319 @@
+openapi: 3.0.3
+info:
+  title: Reply Reranker Bot API
+  description: |
+    Внутренний API сервиса чат-бота с реранкером реплик.
+    Telegram-бот передаёт сюда сообщения из чата и получает готовый ответ.
+    Разработчик через этот же API смотрит выбранные примеры и запускает оценку реранкера.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Локальный запуск сервиса (адрес-заглушка, реального сервера нет)
+tags:
+  - name: Ответы
+    description: Ответ бота на сообщение и выбранные для него примеры
+  - name: Оценка
+    description: Оценка качества реранкера на тестовой выборке
+paths:
+  /replies:
+    post:
+      tags: [Ответы]
+      summary: Получить ответ бота на сообщение
+      description: |
+        Сервис находит 50 кандидатов поиском BM25, оценивает пары «сообщение и кандидат» реранкером,
+        выбирает 5 лучших примеров и запрашивает ответ у LLM (сценарий UC-01).
+        Если реранкер недоступен, используются 5 первых кандидатов BM25, а в ответе `fallback: true`.
+      operationId: createReply
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplyRequest'
+            example:
+              chatId: "-1001234567890"
+              text: кто-нибудь идёт сегодня на пару по экономике?
+              debug: false
+      responses:
+        '200':
+          description: Ответ сформирован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reply'
+        '400':
+          description: Некорректный запрос, например пустой текст сообщения
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: INVALID_TEXT
+                message: Text must not be empty
+        '503':
+          description: Модели или индекс реплик ещё не загружены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: MODELS_NOT_READY
+                message: Reranker and reply index are still loading
+        '504':
+          description: LLM не ответила за отведённое время; бот ничего не пишет в чат, ошибка записана в журнал
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: LLM_TIMEOUT
+                message: LLM did not respond within 20 seconds
+  /replies/{replyId}/examples:
+    get:
+      tags: [Ответы]
+      summary: Получить примеры, выбранные для ответа
+      description: Возвращает примеры, которые реранкер выбрал для запроса к LLM, по убыванию оценки (US-02).
+      operationId: getReplyExamples
+      parameters:
+        - name: replyId
+          in: path
+          required: true
+          description: Идентификатор ответа из `POST /replies`
+          schema:
+            type: string
+            format: uuid
+          example: 3f2b8c1e-7a4d-4e8b-9c11-2d5e6f7a8b90
+      responses:
+        '200':
+          description: Примеры найдены
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RankedExample'
+        '404':
+          description: Ответ с таким идентификатором не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: REPLY_NOT_FOUND
+                message: Reply 3f2b8c1e-7a4d-4e8b-9c11-2d5e6f7a8b90 not found
+  /evaluations:
+    post:
+      tags: [Оценка]
+      summary: Запустить оценку реранкера
+      description: Запускает расчёт метрик реранкера и бейзлайна BM25 на тестовой выборке (US-03). Расчёт идёт в фоне.
+      operationId: createEvaluation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluationRequest'
+            example:
+              split: test
+              includeBaseline: true
+      responses:
+        '202':
+          description: Оценка поставлена в очередь
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evaluation'
+              example:
+                evaluationId: 42
+                status: queued
+                split: test
+        '400':
+          description: Неизвестная часть выборки
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: INVALID_SPLIT
+                message: "Split must be one of: validation, test"
+  /evaluations/{evaluationId}:
+    get:
+      tags: [Оценка]
+      summary: Получить результаты оценки
+      description: Возвращает статус оценки и, когда расчёт закончен, метрики реранкера и BM25 для сравнения в одной таблице.
+      operationId: getEvaluation
+      parameters:
+        - name: evaluationId
+          in: path
+          required: true
+          description: Идентификатор оценки из `POST /evaluations`
+          schema:
+            type: integer
+            minimum: 1
+          example: 42
+      responses:
+        '200':
+          description: Оценка найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evaluation'
+        '404':
+          description: Оценка с таким идентификатором не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: EVALUATION_NOT_FOUND
+                message: Evaluation 42 not found
+components:
+  schemas:
+    ReplyRequest:
+      type: object
+      required:
+        - chatId
+        - text
+      properties:
+        chatId:
+          type: string
+          description: Идентификатор чата в Telegram
+          example: "-1001234567890"
+        text:
+          type: string
+          description: Текст входного сообщения
+          minLength: 1
+          maxLength: 4096
+          example: кто-нибудь идёт сегодня на пару по экономике?
+        debug:
+          type: boolean
+          description: Вернуть вместе с ответом выбранные примеры с оценками
+          default: false
+    Reply:
+      type: object
+      required:
+        - replyId
+        - text
+        - examplesUsed
+        - fallback
+      properties:
+        replyId:
+          type: string
+          format: uuid
+          example: 3f2b8c1e-7a4d-4e8b-9c11-2d5e6f7a8b90
+        text:
+          type: string
+          description: Текст ответа, который бот отправит в чат
+          example: я иду, но опоздаю минут на десять
+        examplesUsed:
+          type: integer
+          description: Сколько примеров попало в запрос к LLM (0, если подходящих не нашлось)
+          minimum: 0
+          maximum: 5
+          example: 5
+        fallback:
+          type: boolean
+          description: true, если реранкер был недоступен и примеры взяты из BM25 без переранжирования
+          example: false
+        rerankerVersion:
+          type: string
+          description: Версия модели-реранкера
+          example: reranker-2026-10-20
+        examples:
+          type: array
+          description: Выбранные примеры, только при `debug = true`
+          items:
+            $ref: '#/components/schemas/RankedExample'
+    RankedExample:
+      type: object
+      required:
+        - message
+        - reply
+        - rerankerScore
+      properties:
+        message:
+          type: string
+          description: Сообщение из сохранённой пары
+          example: кто на пару завтра?
+        reply:
+          type: string
+          description: Реплика-ответ из сохранённой пары
+          example: я буду, только к второй половине
+        rerankerScore:
+          type: number
+          format: float
+          description: Оценка реранкера, насколько реплика подходит как ответ (больше - лучше)
+          example: 0.87
+        bm25Score:
+          type: number
+          format: float
+          description: Оценка поиска BM25 на этапе отбора кандидатов
+          example: 12.4
+    EvaluationRequest:
+      type: object
+      required:
+        - split
+      properties:
+        split:
+          type: string
+          enum: [validation, test]
+          description: Часть выборки для оценки
+          example: test
+        includeBaseline:
+          type: boolean
+          description: Посчитать те же метрики для бейзлайна BM25
+          default: true
+    Metrics:
+      type: object
+      description: Метрики ранжирования
+      properties:
+        recallAt1:
+          type: number
+          format: float
+          example: 0.41
+        recallAt5:
+          type: number
+          format: float
+          example: 0.72
+        mrr:
+          type: number
+          format: float
+          example: 0.55
+        ndcgAt10:
+          type: number
+          format: float
+          example: 0.61
+    Evaluation:
+      type: object
+      required:
+        - evaluationId
+        - status
+      properties:
+        evaluationId:
+          type: integer
+          example: 42
+        status:
+          type: string
+          enum: [queued, running, done, failed]
+          example: done
+        split:
+          type: string
+          example: test
+        reranker:
+          $ref: '#/components/schemas/Metrics'
+        bm25:
+          $ref: '#/components/schemas/Metrics'
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Машинный код ошибки
+          example: INVALID_TEXT
+        message:
+          type: string
+          description: Описание ошибки для разработчика
+          example: Text must not be empty
